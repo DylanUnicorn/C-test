@@ -21,6 +21,15 @@ void initEditor() {
     E.statusmsg_time = 0;
     E.dirty = 0; // 初始化为未修改
 
+    // --- 搜索相关字段初始化 START ---
+    E.query = NULL; // 初始搜索词为空
+    E.last_match_row = -1; // -1 表示未找到或未开始搜索
+    E.last_match_col = -1;
+    E.search_direction = 1; // 默认向下搜索
+    E.current_match_row = -1; // 默认没有当前高亮匹配项
+    E.current_match_col = -1;
+    // --- 搜索相关字段初始化 END ---
+
     // 获取终端大小
     struct winsize ws;
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
@@ -50,7 +59,7 @@ void editorRefreshScreen() {
             if (E.numrows == 0 && y == E.screenrows / 3) {
                 char welcome[80];
                 int welcomelen = snprintf(welcome, sizeof(welcome),
-                    "Kilo editor -- version %d.%d.%d", 0, 0, 1);
+                    "Hello world");
                 if (welcomelen > E.screencols) welcomelen = E.screencols;
                 int padding = (E.screencols - welcomelen) / 2;
                 if (padding) {
@@ -67,7 +76,29 @@ void editorRefreshScreen() {
             int len = E.row[filerow].rsize - E.coloff; // 使用 rsize
             if (len < 0) len = 0;
             if (len > E.screencols) len = E.screencols;
-            abAppend(&ab, &E.row[filerow].render[E.coloff], len); // 使用 render
+
+            char *c = &E.row[filerow].render[E.coloff];
+            size_t current_render_col = E.coloff; // 当前渲染的列在 render 字符串中的索引
+
+            for (int i = 0; i < len; i++) {
+                // 判断是否是当前匹配项的高亮区域
+                // 仅当 filerow 是当前高亮行 且 当前渲染位置在匹配项范围内时高亮
+                if (filerow == E.current_match_row &&
+                    current_render_col >= (size_t)E.current_match_col &&
+                    current_render_col < (size_t)E.current_match_col + (E.query ? strlen(E.query) : 0))
+                {
+                    abAppend(&ab, "\x1b[7m", 4); // 反色显示 (高亮)
+                }
+                abAppend(&ab, &c[i], 1); // 绘制字符
+                if (filerow == E.current_match_row &&
+                    current_render_col >= (size_t)E.current_match_col &&
+                    current_render_col < (size_t)E.current_match_col + (E.query ? strlen(E.query) : 0))
+                {
+                    abAppend(&ab, "\x1b[m", 3); // 恢复正常显示
+                }
+                current_render_col++;
+            }
+            // abAppend(&ab, &E.row[filerow].render[E.coloff], len); // 使用 render
         }
 
         abAppend(&ab, "\x1b[K", 3); // 清除行尾

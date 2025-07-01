@@ -16,7 +16,7 @@ int main(int argc, char *argv[]) {
         editorOpen("[No Name]"); // 打开一个新文件
     }
 
-    editorSetStatusMessage("HELP: Ctrl-Q = quit | Ctrl-S = save"); // 初始化状态栏消息
+    editorSetStatusMessage("HELP: Ctrl-Q = quit | Ctrl-S = save | Ctrl-f = search"); // 初始化状态栏消息
 
     while (1) {
         editorRefreshScreen();

@@ -46,6 +46,16 @@ typedef struct editorConfig {
     char statusmsg[80]; /// 状态栏消息
     time_t statusmsg_time; /// 你好
     int dirty;
+
+    // --- 搜索相关字段 START ---
+    char *query;         // 存储当前搜索词
+    int last_match_row;  // 上次找到匹配项的行号
+    int last_match_col;  // 上次找到匹配项的列号
+    int search_direction; // 搜索方向：1 为向下，-1 为向上
+    int current_match_row; // 当前高亮匹配项的行
+    size_t current_match_col; // 当前高亮匹配项的列
+    // --- 搜索相关字段 END ---
+
     // struct termios orig_termios; // This is now managed by rawmode.c internally, no need here.
 } editorConfig;
 
@@ -70,6 +80,7 @@ void editorFreeAllRows(void); // 新增：释放所有行内存
 /// input
 void editorProcessKeypress(void);
 char *editorPrompt(const char *prompt, ...); 
+void editorFind(void);/// 搜索函数
 
 /// file
 char *editorRowsToString(int *buflen);

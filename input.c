@@ -141,6 +141,194 @@ char *editorPrompt(const char *prompt, ...) {
     }
 }
 
+///  region Search Functions
+// 用于存储上一次搜索结果的静态变量
+static char *last_query = NULL;
+static int last_query_len = 0;
+
+// 清理上次的搜索高亮
+void editorFindCleanup() {
+    E.current_match_row = -1;
+    E.current_match_col = -1;
+    editorRefreshScreen(); // 刷新屏幕以移除高亮
+}
+
+void editorFind() {
+    // 1. 保存当前光标位置，以便搜索结束后可以返回
+    int original_cx = E.cx;
+    int original_cy = E.cy;
+    int original_rowoff = E.rowoff;
+    int original_coloff = E.coloff;
+
+    // 2. 记住上一次的搜索词和方向
+    if (last_query != NULL) {
+        // 如果有上次搜索词，则将其设置为当前的 E.query，以便重新开始搜索时显示
+        if (E.query) free(E.query);
+        E.query = strdup(last_query); // 复制上次的搜索词
+    } else {
+        // 确保 E.query 在没有上次搜索时是 NULL
+        if (E.query) { free(E.query); E.query = NULL; }
+    }
+
+    E.last_match_row = -1; // 重置上次匹配
+    E.last_match_col = -1;
+    E.search_direction = 1; // 默认向下搜索
+
+    // 3. 进入搜索模式循环
+    // char *query_input;
+    // 确保 editorPrompt 能够显示并处理上次的搜索词作为初始值
+    // editorPrompt 已经有 %s 格式化，但需要它在内部将 E.query 设为提示的初始值
+    // 这里我们先清空 E.statusmsg，然后直接用 E.query (last_query) 来构建提示
+    editorSetStatusMessage("Search: %s (Use Arrows for next/prev, Enter to confirm, Esc to cancel)", E.query ? E.query : "");
+
+    // 搜索循环
+    int c;
+    int current_row_search_start = E.cy; // 从当前光标所在行开始搜索
+    int current_col_search_start = E.cx; // 从当前光标所在列开始搜索
+
+    while (1) {
+        editorRefreshScreen(); // 实时刷新屏幕
+
+        c = editorReadKey(); // 读取用户输入
+
+        // 处理搜索导航键
+        if (c == ARROW_RIGHT || c == ARROW_DOWN) {
+            E.search_direction = 1; // 向下搜索
+        } else if (c == ARROW_LEFT || c == ARROW_UP) {
+            E.search_direction = -1; // 向上搜索
+        } else if (c == '\r') { // Enter 确认搜索，退出
+            // 搜索结束，清除状态栏消息，但保留高亮和光标位置
+            editorSetStatusMessage("");
+            break;
+        } else if (c == '\x1b') { // Esc 退出搜索，恢复光标
+            editorSetStatusMessage("");
+            E.cx = original_cx; // 恢复光标位置
+            E.cy = original_cy;
+            E.rowoff = original_rowoff;
+            E.coloff = original_coloff;
+            editorFindCleanup(); // 清除高亮
+            // 释放当前搜索词，但不清除 last_query
+            if (E.query) { free(E.query); E.query = NULL; }
+            return;
+        } else if (c == DEL_KEY || c == CTRL_KEY('h') || c == '\x7f') { // Backspace
+            if (E.query && strlen(E.query) > 0) {
+                E.query[strlen(E.query) - 1] = '\0'; // 删除最后一个字符
+                // 重新开始搜索以更新高亮
+                E.last_match_row = -1;
+                E.last_match_col = -1;
+                E.current_match_row = -1; // 重置当前高亮
+                E.current_match_col = -1;
+                current_row_search_start = E.cy; // 重新从当前光标开始
+                current_col_search_start = E.cx;
+            } else {
+                // 如果搜索词为空且按了退格，不进行操作
+                continue;
+            }
+        } else if (!iscntrl(c) && c < 128) { // 普通字符输入
+            // 追加字符到搜索词
+            size_t current_query_len = E.query ? strlen(E.query) : 0;
+            E.query = realloc(E.query, current_query_len + 2); // +1 for char, +1 for null
+            if (E.query == NULL) die("realloc query");
+            E.query[current_query_len] = c;
+            E.query[current_query_len + 1] = '\0';
+
+            // 每次输入字符后，重置搜索起点和上次匹配，以便从头开始新的增量搜索
+            E.last_match_row = -1;
+            E.last_match_col = -1;
+            E.current_match_row = -1; // 重置当前高亮
+            E.current_match_col = -1;
+            current_row_search_start = E.cy; // 重新从当前光标开始
+            current_col_search_start = E.cx;
+        } else {
+            // 忽略其他按键（例如 Ctrl 键等，因为它们不是搜索输入或导航键）
+            continue;
+        }
+
+        // 4. 执行搜索逻辑
+        if (E.query && strlen(E.query) > 0) {
+            int found = 0;
+            int current_row = current_row_search_start;
+            int current_col = current_col_search_start;
+            int start_row_for_loop = E.search_direction == 1 ? current_row : current_row; // 循环起始行
+            int start_col_for_loop = E.search_direction == 1 ? current_col : current_col; // 循环起始列
+
+            // 循环搜索机制
+            for (int i = 0; i < E.numrows; i++) {
+                current_row = (start_row_for_loop + E.search_direction * i + E.numrows) % E.numrows;
+
+                erow *row = &E.row[current_row];
+                char *match = NULL;
+
+                if (E.search_direction == 1) { // 向下搜索
+                    // 从指定列开始搜索
+                    match = strstr(row->chars + (current_row == start_row_for_loop ? start_col_for_loop : 0), E.query);
+                } else { // 向上搜索 (需要从后往前找)
+                    size_t query_len = strlen(E.query); // 获取查询字符串长度，类型是 size_t
+                    if (query_len == 0) continue; // 避免空查询导致问题
+
+                    // 如果行太短无法包含查询，直接跳过
+                    if ((size_t)row->size < query_len) continue;
+
+                    // 对于向上搜索，需要遍历所有可能的起始点
+                    for (size_t j = row->size - query_len; ; j--) {
+                        // 确保 j + strlen(E.query) 不会越界
+                        if (j + query_len <= (size_t)row->size) {
+                            if (strncmp(&row->chars[j], E.query, query_len) == 0) {
+                                match = &row->chars[j];
+                                break; // 找到最靠右的匹配项
+                            }
+                        }
+                        // 如果 j 减到 0，且 j + query_len 仍然小于 query_len (即 query_len 大于 row->size)
+                        // 这种情况不可能匹配，因为查询字符串比行还长
+                        if (j == 0) break; // 防止 size_t j-- 减到负数变成一个大正数，导致无限循环
+                    }
+                }
+
+                if (match) {
+                    E.last_match_row = current_row;
+                    E.last_match_col = match - row->chars;
+
+                    // 设置当前高亮匹配项并移动光标和视图
+                    E.current_match_row = E.last_match_row;
+                    E.current_match_col = E.last_match_col;
+                    E.cy = E.current_match_row;
+                    E.cx = E.current_match_col;
+                    E.rowoff = E.numrows; // 强制滚动，确保匹配项可见 (临时设置为一个大值)
+                    editorScroll();       // 调用 scroll 来更新 rowoff, coloff
+                    found = 1;
+                    break; // 找到一个匹配项就停止，以便用户按方向键继续
+                }
+            }
+
+            if (!found) {
+                editorSetStatusMessage("Search: \"%s\" (Not found)", E.query);
+                editorFindCleanup(); // 清除任何可能存在的旧高亮
+            } else {
+                 editorSetStatusMessage("Search: %s", E.query);
+            }
+        } else {
+             editorFindCleanup(); // 搜索词为空时清除高亮
+             editorSetStatusMessage("Search: (empty query)");
+        }
+        // 对于每次搜索操作，更新起始行和列，以便下次搜索可以从当前光标位置继续
+        current_row_search_start = E.cy;
+        current_col_search_start = E.cx;
+
+        // 保存当前有效的搜索词到 last_query
+        if (E.query) {
+            if (last_query) free(last_query);
+            last_query = strdup(E.query);
+            last_query_len = strlen(last_query);
+        } else {
+            if (last_query) { free(last_query); last_query = NULL; }
+            last_query_len = 0;
+        }
+    }
+    // 退出搜索模式后，清除上次的搜索词
+    // if (E.query) { free(E.query); E.query = NULL; } // 重新进入会复制 last_query
+}
+/// endregion Search Functions
+
 // --- Input Processing ---
 
 void editorProcessKeypress() {
@@ -193,6 +381,10 @@ void editorProcessKeypress() {
         // 屏蔽其他特殊字符和控制字符的直接插入
         case '\x1b': // Esc
             break; // 什么都不做
+
+        case CTRL_KEY('f'): // Ctrl-F：进入搜索模式
+            editorFind();
+            break;
 
         default:
             // 只处理可打印字符和制表符作为普通字符插入
