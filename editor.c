@@ -9,6 +9,7 @@
 #include <sys/ioctl.h> // For ioctl, TIOCGWINSZ
 #include <time.h> // For time_t, time
 #include <errno.h> // For EAGAIN etc.
+#include <ctype.h> // For isprint
 
 // Global editor configuration instance
 editorConfig E;
@@ -40,6 +41,50 @@ void abFree(struct abuf *ab) { // Moved to editor.h
     ab->len = 0;
 }
 
+// --- Raw Operations ---
+// 更新行的渲染内容（处理 Tab）
+void editorUpdateRow(erow *row) {
+    int tabs = 0;
+    for (int i = 0; i < row->size; i++) {
+        if (row->chars[i] == '\t') tabs++;
+    }
+
+    free(row->render);
+    row->render = malloc(row->size + tabs * (KILO_TAB_STOP - 1) + 1);
+    if (row->render == NULL) die("malloc render"); // 错误处理
+
+    int idx = 0;
+    for (int i = 0; i < row->size; i++) {
+        if (row->chars[i] == '\t') {
+            do {
+                row->render[idx++] = ' ';
+            } while (idx % KILO_TAB_STOP != 0); // 确保对齐到 Tab 停止位
+        } else {
+            row->render[idx++] = row->chars[i];
+        }
+    }
+    row->render[idx] = '\0';
+    row->rsize = idx;
+}
+
+// 向编辑器中追加一行
+void editorAppendRow(char *s, size_t len) {
+    E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
+    if (E.row == NULL) die("realloc row"); // 错误处理
+
+    E.row[E.numrows].size = len;
+    E.row[E.numrows].chars = malloc(len + 1);
+    if (E.row[E.numrows].chars == NULL) die("malloc chars"); // 错误处理
+    memcpy(E.row[E.numrows].chars, s, len);
+    E.row[E.numrows].chars[len] = '\0';
+
+    E.row[E.numrows].rsize = 0;
+    E.row[E.numrows].render = NULL;
+    editorUpdateRow(&E.row[E.numrows]); // 更新渲染后的行
+
+    E.numrows++;
+}
+
 // --- Editor Initialization ---
 
 void initEditor() {
@@ -55,51 +100,21 @@ void initEditor() {
 
     // Get terminal size
     struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-        // Fallback: Try to get cursor position using ANSI escape sequence
-        // This is a less reliable fallback, but better than nothing.
-        // It requires the terminal to respond, and you're in raw mode.
-        // It should already be handled by the rawmode.c's editorReadKey for '\x1b'
-        // For simplicity, for initial setup, let's assume a default size if ioctl fails.
-        // Or, you can add a `getWindowSize` helper function.
-        // For now, let's just use a default or try the specific escape sequence.
-        
-        // This part needs to be careful: if ioctl fails, and we try to read,
-        // it might block indefinitely if the terminal doesn't respond.
-        // For robustness, consider a timeout on `read` if you go this route.
-        // For now, let's just use default if ioctl fails.
-        // write(STDOUT_FILENO, "\x1b[999C\x1b[999B\x1b[6n", 18); // Move to bottom right and query cursor pos
-        // char buf[32];
-        // unsigned int i = 0;
-        // // This read could block if no response, consider a non-blocking read or timeout
-        // if (read(STDIN_FILENO, buf, sizeof(buf) - 1) != 1) { // Read response
-        //     E.screenrows = 24; // Default
-        //     E.screencols = 80; // Default
-        //     return;
-        // }
-        // buf[i] = '\0';
-        // if (buf[0] == '\x1b' && buf[1] == '[') {
-        //     if (sscanf(&buf[2], "%d;%d", &E.screenrows, &E.screencols) != 2) {
-        //         E.screenrows = 24;
-        //         E.screencols = 80;
-        //     }
-        // }
-        // write(STDOUT_FILENO, "\x1b[H", 3); // Move cursor back to top-left
-
-        // For simplicity, if ioctl fails, set a default size.
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {   
+        // 假如ioctl失败，使用默认值
         E.screenrows = 24;
         E.screencols = 80;
     } else {
         E.screencols = ws.ws_col;
         E.screenrows = ws.ws_row;
     }
-    // Subtract space for status bar and message bar
+    // 减去状态栏和消息栏的两行
     E.screenrows -= 2;
 }
 
 // --- Editor Drawing ---
 
-// Draw each row of text to the buffer
+// 绘制每一行文本到缓冲区
 void editorDrawRows(struct abuf *ab) {
     for (int y = 0; y < E.screenrows; y++) {
         int filerow = E.rowoff + y;
@@ -108,7 +123,7 @@ void editorDrawRows(struct abuf *ab) {
             if (E.numrows == 0 && y == E.screenrows / 3) {
                 char welcome[80];
                 int welcomelen = snprintf(welcome, sizeof(welcome),
-                    "Kilo editor -- version %d.%d.%d", 0, 0, 1); // Replace with your version
+                    "Hello, World!"); // Replace with your version
                 if (welcomelen > E.screencols) welcomelen = E.screencols;
                 int padding = (E.screencols - welcomelen) / 2;
                 if (padding) {
@@ -134,7 +149,7 @@ void editorDrawRows(struct abuf *ab) {
     }
 }
 
-// Draw status bar
+// 状态栏
 void editorDrawStatusBar(struct abuf *ab) {
     abAppend(ab, "\x1b[7m", 4); // Invert colors
     char status[80], rstatus[80];
@@ -159,42 +174,57 @@ void editorDrawStatusBar(struct abuf *ab) {
     abAppend(ab, "\r\n", 2);
 }
 
-// Draw message bar
+// 绘制消息栏（可能会用于搜索）
 void editorDrawMessageBar(struct abuf *ab) {
     abAppend(ab, "\x1b[K", 3); // Clear current line
     int msglen = strlen(E.statusmsg);
     if (msglen > E.screencols) msglen = E.screencols;
     if (msglen && time(NULL) - E.statusmsg_time < 5) { // Message displays for 5 seconds
         abAppend(ab, E.statusmsg, msglen);
+    } else {
+        /// 搜索的一些提示信息ctrl + F
+
     }
 }
 
-// Refresh screen
+// 刷新屏幕
 void editorRefreshScreen() {
     editorScroll(); // Process scrolling before refreshing
 
     struct abuf ab = ABUF_INIT;
 
-    abAppend(&ab, "\x1b[?25l", 6); // Hide cursor
-    abAppend(&ab, "\x1b[H", 3);    // Move cursor to top-left (1,1)
+    abAppend(&ab, "\x1b[?25l", 6); // 隐藏光标
+    abAppend(&ab, "\x1b[H", 3);    // 光标移动到屏幕左上角
 
     editorDrawRows(&ab);
     editorDrawStatusBar(&ab);
     editorDrawMessageBar(&ab);
 
-    // Position cursor at cx, cy
+    // 光标定位到cx， cy位置
+    /// 将 E.cx 和 E.cy 转换为屏幕坐标
+    int rx = 0;
+    if (E.cy < E.numrows) { // 确保当前行有效
+        for (int i = 0; i < E.cx; i++) {
+            if (E.row[E.cy].chars[i] == '\t') {
+                rx += (KILO_TAB_STOP - (rx % KILO_TAB_STOP));
+            } else {
+                rx++;
+            }
+        }
+    }
+
     char buf[32];
     snprintf(buf, sizeof(buf), "\x1b[%d;%dH", (E.cy - E.rowoff) + 1,
-                                            (E.cx - E.coloff) + 1);
+                                            (rx - E.coloff) + 1); /// 使用rx !
     abAppend(&ab, buf, strlen(buf));
 
-    abAppend(&ab, "\x1b[?25h", 6); // Show cursor
+    abAppend(&ab, "\x1b[?25h", 6); // 显示光标
 
     write(STDOUT_FILENO, ab.b, ab.len);
     abFree(&ab);
 }
 
-// Set status bar message
+// 设置状态栏消息
 void editorSetStatusMessage(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -203,9 +233,21 @@ void editorSetStatusMessage(const char *fmt, ...) {
     E.statusmsg_time = time(NULL);
 }
 
-// --- Scrolling ---
+// --- 滚动 ---
 void editorScroll() {
-    // Vertical scrolling
+    // 如果光标在屏幕外，调整偏移量
+    int rx = 0;
+    if (E.cy < E.numrows) { // 确保当前行有效
+        for (int i = 0; i < E.cx; i++) {
+            if (E.row[E.cy].chars[i] == '\t') {
+                rx += (KILO_TAB_STOP - (rx % KILO_TAB_STOP));
+            } else {
+                rx++;
+            }
+        }
+    }
+
+    // 垂直滚动
     if (E.cy < E.rowoff) {
         E.rowoff = E.cy;
     }
@@ -213,7 +255,7 @@ void editorScroll() {
         E.rowoff = E.cy - E.screenrows + 1;
     }
 
-    // Horizontal scrolling
+    // 水平滚动
     if (E.cx < E.coloff) {
         E.coloff = E.cx;
     }
@@ -222,25 +264,25 @@ void editorScroll() {
     }
 }
 
-// --- Cursor Movement ---
+// --- 光标移动 ---
 
 void editorMoveCursor(int key) {
-    // Ensure cursor doesn't go past end of row, otherwise it could lead to illegal memory access
-    erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
+    /// 时刻注意光标不要超过行尾，否则访问非法内存
+    erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy]; /// 使用原始文本的行
 
     switch (key) {
         case ARROW_LEFT:
             if (E.cx > 0) {
                 E.cx--;
-            } else if (E.cy > 0) { // If at start of line, move to end of previous line
+            } else if (E.cy > 0) { // 如果在行首按左箭头，移动到上一行行尾
                 E.cy--;
                 E.cx = E.row[E.cy].size;
             }
             break;
         case ARROW_RIGHT:
-            if (row && E.cx < row->size) { // Ensure cursor doesn't exceed current line's char length
+            if (row && E.cx < row->size) { // 移动光标，不超过当前行的原始文本长度
                 E.cx++;
-            } else if (row && E.cx == row->size && E.cy < E.numrows - 1) { // If at end of line, move to start of next line
+            } else if (row && E.cx == row->size && E.cy < E.numrows - 1) { // 如果在行尾按右箭头，移动到下一行行首
                 E.cy++;
                 E.cx = 0;
             }
@@ -251,21 +293,27 @@ void editorMoveCursor(int key) {
             }
             break;
         case ARROW_DOWN:
-            if (E.cy < E.numrows) { // Can move to one line past the end of file (for new line input)
+            if (E.cy < E.numrows - 1) { // 只能移动到已存在的文本行的末尾 这个-1有待斟酌
                 E.cy++;
             }
             break;
         case PAGE_UP: {
-            int times = E.screenrows;
-            while (times--) {
-                editorMoveCursor(ARROW_UP);
-            }
-            break;
+            // int times = E.screenrows;
+            // while (times--) {
+            //     editorMoveCursor(ARROW_UP);
+            // }
+            // break;
         }
         case PAGE_DOWN: {
-            int times = E.screenrows;
-            while (times--) {
-                editorMoveCursor(ARROW_DOWN);
+            if(key == PAGE_UP) {
+                E.cy = E.rowoff; // 移动到当前屏幕可见的第一行
+            } else {
+                E.cy = E.rowoff + E.screenrows - 1; // 移动到当前屏幕可见的最后一行
+                if (E.cy > E.numrows - 1) E.cy = E.numrows - 1; // 确保不超过文件末尾
+            }
+
+            for (int i = 0; i < E.screenrows; i++) {
+                editorMoveCursor(key == PAGE_UP ? ARROW_UP : ARROW_DOWN);
             }
             break;
         }
@@ -279,7 +327,8 @@ void editorMoveCursor(int key) {
             break;
     }
 
-    // After cursor movement, prevent cx from exceeding the actual length of the current row
+    // 调整光标的横向位置，防止光标移动到空行的末尾或者比下一行的内容长
+    // 每次光标垂直移动后，确保E.cx不超过当前行的实际长度
     row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
     int rowlen = row ? row->size : 0;
     if (E.cx > rowlen) {
@@ -292,7 +341,7 @@ void editorProcessKeypress() {
     int c = editorReadKey();
 
     switch (c) {
-        case '\r': // Enter key (for future text editing)
+        case '\r': // Enter key (for future text editing, but now we just handle it)
             break;
 
         case CTRL_KEY('q'): // Ctrl-Q to quit
@@ -319,10 +368,12 @@ void editorProcessKeypress() {
 }
 
 // --- File Operations ---
-// This is where you would load/save files.
-// For now, we'll just add a dummy line.
+/// 将会支持保存文件和打开文件
 void editorOpen(char *filename) {
-    free(E.filename);
+    if(E.filename){
+        free(E.filename); 
+        E.filename = NULL; 
+    }
     E.filename = strdup(filename);
 
     FILE *fp = fopen(filename, "r");
@@ -339,17 +390,13 @@ void editorOpen(char *filename) {
                                line[linelen - 1] == '\r'))
             linelen--;
 
-        // For now, we'll just add a simple row
-        E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
-        if (E.row == NULL) die("realloc");
-
-        E.row[E.numrows].size = linelen;
-        E.row[E.numrows].chars = malloc(linelen + 1);
-        if (E.row[E.numrows].chars == NULL) die("malloc");
-        memcpy(E.row[E.numrows].chars, line, linelen);
-        E.row[E.numrows].chars[linelen] = '\0';
-        E.numrows++;
+        editorAppendRow(line, linelen);
     }
     free(line);
     fclose(fp);
+
+    // 如果文件是完全空的（即没有任何内容被读入），也添加一个空行
+    if (E.numrows == 0) {
+        editorAppendRow("", 0); // 添加一个空行
+    }
 }
