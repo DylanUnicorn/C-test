@@ -50,7 +50,7 @@
 //     }
 
 //     free(row->render);
-//     row->render = malloc(row->size + tabs * (KILO_TAB_STOP - 1) + 1);
+//     row->render = malloc(row->size + tabs * (TAB_WIDTH - 1) + 1);
 //     if (row->render == NULL) die("malloc render"); // 错误处理
 
 //     int idx = 0;
@@ -58,7 +58,7 @@
 //         if (row->chars[i] == '\t') {
 //             do {
 //                 row->render[idx++] = ' ';
-//             } while (idx % KILO_TAB_STOP != 0); // 确保对齐到 Tab 停止位
+//             } while (idx % TAB_WIDTH != 0); // 确保对齐到 Tab 停止位
 //         } else {
 //             row->render[idx++] = row->chars[i];
 //         }
@@ -206,7 +206,7 @@
 //     if (E.cy < E.numrows) { // 确保当前行有效
 //         for (int i = 0; i < E.cx; i++) {
 //             if (E.row[E.cy].chars[i] == '\t') {
-//                 rx += (KILO_TAB_STOP - (rx % KILO_TAB_STOP));
+//                 rx += (TAB_WIDTH - (rx % TAB_WIDTH));
 //             } else {
 //                 rx++;
 //             }
@@ -240,7 +240,7 @@
 //     if (E.cy < E.numrows) { // 确保当前行有效
 //         for (int i = 0; i < E.cx; i++) {
 //             if (E.row[E.cy].chars[i] == '\t') {
-//                 rx += (KILO_TAB_STOP - (rx % KILO_TAB_STOP));
+//                 rx += (TAB_WIDTH - (rx % TAB_WIDTH));
 //             } else {
 //                 rx++;
 //             }

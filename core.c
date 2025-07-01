@@ -114,7 +114,7 @@ void editorRefreshScreen() {
     if (E.cy < E.numrows) { // 确保当前行有效
         for (int i = 0; i < E.cx; i++) {
             if (E.row[E.cy].chars[i] == '\t') {
-                rx += (KILO_TAB_STOP - (rx % KILO_TAB_STOP));
+                rx += (TAB_WIDTH - (rx % TAB_WIDTH));
             } else {
                 rx++;
             }
@@ -139,7 +139,7 @@ void editorScroll() {
     if (E.cy < E.numrows) {
         for (int i = 0; i < E.cx; i++) {
             if (E.row[E.cy].chars[i] == '\t') {
-                rx += (KILO_TAB_STOP - (rx % KILO_TAB_STOP));
+                rx += (TAB_WIDTH - (rx % TAB_WIDTH));
             } else {
                 rx++;
             }

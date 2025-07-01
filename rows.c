@@ -26,7 +26,7 @@ void editorUpdateRow(erow *row) {
     }
 
     free(row->render); // 释放旧的渲染内存
-    row->render = malloc(row->size + tabs * (KILO_TAB_STOP - 1) + 1);
+    row->render = malloc(row->size + tabs * (TAB_WIDTH - 1) + 1);
     if (row->render == NULL) die("malloc render");
 
     int idx = 0;
@@ -34,7 +34,7 @@ void editorUpdateRow(erow *row) {
         if (row->chars[i] == '\t') {
             do {
                 row->render[idx++] = ' ';
-            } while (idx % KILO_TAB_STOP != 0); // 确保对齐到 Tab 停止位
+            } while (idx % TAB_WIDTH != 0); // 确保对齐到 Tab 停止位
         } else {
             row->render[idx++] = row->chars[i];
         }

@@ -144,13 +144,226 @@ char *editorPrompt(const char *prompt, ...) {
 ///  region Search Functions
 // 用于存储上一次搜索结果的静态变量
 static char *last_query = NULL;
-static int last_query_len = 0;
+// static int last_query_len = 0;
 
 // 清理上次的搜索高亮
 void editorFindCleanup() {
     E.current_match_row = -1;
     E.current_match_col = -1;
     editorRefreshScreen(); // 刷新屏幕以移除高亮
+}
+
+// 核心的搜索查找函数，独立出来
+static void editorFindDoSearch(void) {
+    if (!E.query || strlen(E.query) == 0) {
+        editorFindCleanup();
+        return;
+    }
+
+    int found_match = 0;
+
+    ///  添加更加严谨的搜索位置判断逻辑
+    // 如果没有上次的搜索结果（或者第一次搜索），或者方向变了，则从光标位置开始搜索
+    // 否则从上次匹配的下一个位置/上一个位置开始搜索
+    int current_search_row = (E.current_match_row == -1) ? E.cy : E.current_match_row;
+    size_t current_search_col = (E.current_match_col == (size_t)-1) ? E.cx : E.current_match_col;
+
+
+    // // 如果是首次搜索或者改变了搜索方向，需要重新设置起始点
+    // if (E.last_match_row == -1 || E.current_match_row == -1) {
+    //     start_row = saved_cy; // 从进入搜索时的光标行开始
+    //     start_col = saved_cx; // 从进入搜索时的光标列开始
+    // } else {
+    //     // 从上次匹配的下一个/上一个位置开始
+    //     if (E.search_direction == 1) { // 向下
+    //         start_col++;
+    //         if (start_col >= E.row[start_row].size) { // 到行尾了，跳到下一行开头
+    //             start_col = 0;
+    //             start_row++;
+    //         }
+    //     } else { // 向上
+    //         if (start_col == 0) { // 到行首了，跳到上一行末尾
+    //             start_row--;
+    //             if (start_row < 0) start_row = E.numrows - 1; // 循环到文件末尾
+    //             if (start_row >= 0) start_col = E.row[start_row].size;
+    //             else start_col = 0; // 如果文件为空
+    //         } else {
+    //             start_col--;
+    //         }
+    //     }
+    // }
+    // 调整搜索起始点以找到下一个/上一个匹配
+    // 这确保了不会重复找到同一个匹配项
+    if (E.current_match_row != -1) { // 只有在已经有匹配项的情况下才调整
+        if (E.search_direction == 1) { // 向下搜索
+            current_search_col++; // 从当前匹配项的下一个字符开始
+            if (current_search_col > E.row[current_search_row].size) {
+                current_search_col = 0; // 如果到行尾，跳到下一行开头
+                current_search_row++;
+            }
+        } else { // 向上搜索
+            if (current_search_col == 0) { // 如果在行首，跳到上一行末尾
+                current_search_row--;
+                // 如果是文件开头了，则循环到文件末尾。
+                // 此时，需要将 current_search_col 设为新行的末尾。
+                if (current_search_row < 0) current_search_row = E.numrows - 1;
+                // 注意：如果 E.numrows == 0，则 current_search_row 会是 -1
+                if (current_search_row >= 0) {
+                    current_search_col = E.row[current_search_row].size;
+                } else {
+                    current_search_col = 0; // 文件为空的情况
+                }
+            } else {
+                current_search_col--; // 从当前匹配项的前一个字符开始
+            }
+        }
+    }
+
+    // 循环搜索机制
+    // int current_row = start_row;
+    // int num_rows_to_check = E.numrows; // 最多检查所有行，防止无限循环
+    // if (num_rows_to_check == 0) num_rows_to_check = 1; // 至少检查一次，防止空文件
+
+    int initial_row = current_search_row;
+    size_t initial_col = current_search_col;
+    int loop_count = 0; // 用于防止无限循环
+
+    for (loop_count = 0; loop_count < E.numrows + 1; loop_count++) { // 最多遍历 E.numrows + 1 次
+        if (current_search_row < 0) { // 向上搜索到达文件开头，循环到文件末尾
+            current_search_row = E.numrows - 1;
+            // 对于循环，如果跳到了文件末尾，列应从行末尾开始（向上搜索）或行首开始（向下搜索）
+            current_search_col = (E.search_direction == -1 && current_search_row >=0) ? E.row[current_search_row].size : 0;
+        } else if (current_search_row >= E.numrows) { // 向下搜索到达文件末尾，循环到文件开头
+            current_search_row = 0;
+            current_search_col = 0;
+        }
+
+        // 如果文件是空的，直接退出
+        if (E.numrows == 0) break;
+        if (current_search_row < 0 || current_search_row >= E.numrows) break; // 确保行号有效
+
+        erow *row = &E.row[current_search_row];
+        char *match = NULL;
+        size_t match_col = (size_t)-1;
+        size_t query_len = strlen(E.query);
+
+        // 如果行内容比查询短，则无法匹配
+        if (row->size < query_len && query_len > 0) {
+            // 如果是向上搜索，并且当前行不能匹配，且这是最后一行，则跳到上一行
+            // 否则，如果向下搜索，且当前行不能匹配，跳到下一行
+            if (E.search_direction == 1) {
+                current_search_row++;
+                current_search_col = 0; // 重置列到行首
+            } else {
+                current_search_row--;
+                // 如果跳到上一行，列应该设为行末尾以继续向上搜索
+                if (current_search_row >= 0) current_search_col = E.row[current_search_row].size;
+                else current_search_col = 0; // 文件为空或到顶
+            }
+            continue; // 继续到下一轮循环
+        }
+
+        if (E.search_direction == 1) { // 向下搜索
+            // 从当前列开始搜索
+            if (current_search_col <= row->size) { // 确保起始列有效
+                match = strstr(row->chars + current_search_col, E.query);
+                if (match) {
+                    match_col = current_search_col + (match - (row->chars + current_search_col));
+                }
+            } else { // 如果 current_search_col 已经超出当前行，从行首开始
+                 match = strstr(row->chars, E.query);
+                 if (match) match_col = match - row->chars;
+            }
+        } else { // 向上搜索 (从后往前找)
+            // 从当前列（或行末尾）开始向左遍历
+            size_t j_start = current_search_col;
+            if (j_start > row->size) j_start = row->size; // 确保起始点在行内
+
+            for (size_t j = j_start; ; j--) {
+                if (j + query_len <= row->size) { // 确保子串不会越界
+                    if (strncmp(&row->chars[j], E.query, query_len) == 0) {
+                        match = &row->chars[j];
+                        match_col = j;
+                        break; // 找到最靠右的匹配项
+                    }
+                }
+                if (j == 0) break; // 已经检查到行首
+            }
+        }
+
+    // for (int i = 0; i < num_rows_to_check; i++) {
+    //     if (current_row < 0) current_row = E.numrows - 1; // 向上循环到文件末尾
+    //     if (current_row >= E.numrows) current_row = 0; // 向下循环到文件开头
+
+    //     erow *row = &E.row[current_row];
+    //     char *match = NULL;
+    //     size_t match_col = (size_t)-1;
+
+    //     // 搜索起点
+    //     char *search_start_ptr = (current_row == start_row) ? (row->chars + start_col) : row->chars;
+    //     size_t search_start_idx = (current_row == start_row) ? start_col : 0;
+
+    //     if (E.search_direction == 1) { // 向下搜索
+    //         // strstr 从 search_start_ptr 开始查找
+    //         match = strstr(search_start_ptr, E.query);
+    //         if (match) {
+    //             match_col = search_start_idx + (match - search_start_ptr);
+    //         }
+    //     } else { // 向上搜索 (从后往前找)
+    //         size_t query_len = strlen(E.query);
+    //         if (query_len == 0) break; // 空查询直接跳过
+
+    //         // 确定向上搜索的起始列
+    //         size_t j_start = (current_row == start_row) ? search_start_idx : (size_t)row->size;
+    //         if (j_start > (size_t)row->size) j_start = row->size; // 确保不超过行长
+
+    //         for (size_t j = j_start; ; j--) {
+    //             if (j + query_len <= (size_t)row->size) { // 确保子串不会越界
+    //                 if (strncmp(&row->chars[j], E.query, query_len) == 0) {
+    //                     match = &row->chars[j];
+    //                     match_col = j;
+    //                     break; // 找到最靠右的匹配项
+    //                 }
+    //             }
+    //             if (j == 0) break; // 已经检查到行首
+    //         }
+    //     }
+
+        if (match) {
+            // 找到了匹配项
+            E.current_match_row = current_search_row;
+            E.current_match_col = match_col;
+            E.cy = E.current_match_row;
+            E.cx = E.current_match_col;
+            editorScroll(); // 滚动到可见区域
+            found_match = 1;
+            // editorSetStatusMessage("Search: %s", E.query);
+            break; // 找到一个匹配项就退出当前行的搜索
+        }
+
+        // 如果本行没有找到，移动到下一行/上一行继续搜索 (循环逻辑)
+        if (E.search_direction == 1) {
+            current_search_row++;
+            current_search_col = 0; // 重置列到行首
+        } else {
+            current_search_col--;
+            /// 从最新的末尾向上搜索
+            if(current_search_row >= 0) current_search_col = E.row[current_search_row].size;
+            else current_search_col = 0; // 文件到顶
+        }
+
+        if (!found_match) {
+            editorSetStatusMessage("Search: \"%s\" (Not found)", E.query);
+            editorFindCleanup(); // 清除任何可能存在的旧高亮
+            E.current_match_row = -1; // 重置当前匹配
+            E.current_match_col = (size_t)-1; // 重置当前匹配列
+        }
+
+        // 重置列的搜索起点为行首/行尾，因为换行了
+        // start_col = (E.search_direction == 1) ? 0 : E.row[current_row].size;
+    }
+
+
 }
 
 void editorFind() {
@@ -170,8 +383,19 @@ void editorFind() {
         if (E.query) { free(E.query); E.query = NULL; }
     }
 
-    E.last_match_row = -1; // 重置上次匹配
-    E.last_match_col = -1;
+    // 重置上次匹配和当前高亮，确保每次进入搜索模式都是从头开始查找
+    // 只有在输入字符或者首次进入搜索时才完全重置
+    // 如果是再次进入，则保留 current_match_row/col 作为起始点
+    if (E.query == NULL || strlen(E.query) == 0 || E.current_match_row == -1) {
+        E.last_match_row = -1;
+        E.last_match_col = (size_t)-1;
+        E.current_match_row = -1;
+        E.current_match_col = (size_t)-1;
+    }
+    // E.last_match_row = -1; // 重置上次匹配
+    // E.last_match_col = (size_t)-1;
+    // E.current_match_row = -1;
+    // E.current_match_col = (size_t)-1; // -1 for size_t
     E.search_direction = 1; // 默认向下搜索
 
     // 3. 进入搜索模式循环
@@ -183,19 +407,30 @@ void editorFind() {
 
     // 搜索循环
     int c;
-    int current_row_search_start = E.cy; // 从当前光标所在行开始搜索
-    int current_col_search_start = E.cx; // 从当前光标所在列开始搜索
+    // int current_row_search_start = E.cy; // 从当前光标所在行开始搜索
+    // int current_col_search_start = E.cx; // 从当前光标所在列开始搜索
+    int saved_cx = E.cx; // 保存当前光标位置作为搜索起点
+    int saved_cy = E.cy;
+
+    // 如果刚进入搜索模式就有查询词，执行一次初始搜索
+    if (E.query && strlen(E.query) > 0) {
+        editorFindDoSearch(); // 执行初始搜索
+    }
 
     while (1) {
         editorRefreshScreen(); // 实时刷新屏幕
 
         c = editorReadKey(); // 读取用户输入
 
+        int perform_search = 0; // 标志是否需要执行一次新的搜索查找
+
         // 处理搜索导航键
         if (c == ARROW_RIGHT || c == ARROW_DOWN) {
             E.search_direction = 1; // 向下搜索
+            perform_search = 1;
         } else if (c == ARROW_LEFT || c == ARROW_UP) {
             E.search_direction = -1; // 向上搜索
+            perform_search = 1;
         } else if (c == '\r') { // Enter 确认搜索，退出
             // 搜索结束，清除状态栏消息，但保留高亮和光标位置
             editorSetStatusMessage("");
@@ -214,16 +449,25 @@ void editorFind() {
             if (E.query && strlen(E.query) > 0) {
                 E.query[strlen(E.query) - 1] = '\0'; // 删除最后一个字符
                 // 重新开始搜索以更新高亮
-                E.last_match_row = -1;
-                E.last_match_col = -1;
-                E.current_match_row = -1; // 重置当前高亮
-                E.current_match_col = -1;
-                current_row_search_start = E.cy; // 重新从当前光标开始
-                current_col_search_start = E.cx;
+                // editorFindCleanup(); // 清除上次的高亮
+                // E.last_match_row = -1;
+                // E.last_match_col = (size_t)-1;
+                // E.search_direction = 1; // 恢复默认搜索方向
+                // // E.current_match_row = -1; // 重置当前高亮
+                // // E.current_match_col = -1;
+                // saved_cy = E.cy; // 重新从当前光标开始
+                // saved_cx = E.cx;
             } else {
-                // 如果搜索词为空且按了退格，不进行操作
+                // 如果搜索词为空且按了退格，清空 query 并跳过后续处理
+                if (E.query) { free(E.query); E.query = NULL; }
+                editorFindCleanup(); // 清除旧高亮
+                editorSetStatusMessage("Search: (empty query)");
                 continue;
             }
+            editorFindCleanup();
+            E.current_match_row = -1; // 重置当前高亮，确保从当前光标开始新的增量搜索
+            E.current_match_col = (size_t)-1;
+            perform_search = 1; // 字符改变
         } else if (!iscntrl(c) && c < 128) { // 普通字符输入
             // 追加字符到搜索词
             size_t current_query_len = E.query ? strlen(E.query) : 0;
@@ -233,97 +477,127 @@ void editorFind() {
             E.query[current_query_len + 1] = '\0';
 
             // 每次输入字符后，重置搜索起点和上次匹配，以便从头开始新的增量搜索
+            editorFindCleanup();
             E.last_match_row = -1;
-            E.last_match_col = -1;
-            E.current_match_row = -1; // 重置当前高亮
-            E.current_match_col = -1;
-            current_row_search_start = E.cy; // 重新从当前光标开始
-            current_col_search_start = E.cx;
+            E.last_match_col = (size_t)-1;
+            E.search_direction = 1;
+            // E.current_match_row = -1; // 重置当前高亮
+            // E.current_match_col = -1;
+            // saved_cy = E.cy; // 重新从当前光标开始
+            // saved_cx = E.cx;
+            perform_search = 1; // 字符改变
         } else {
             // 忽略其他按键（例如 Ctrl 键等，因为它们不是搜索输入或导航键）
             continue;
         }
 
-        // 4. 执行搜索逻辑
-        if (E.query && strlen(E.query) > 0) {
-            int found = 0;
-            int current_row = current_row_search_start;
-            int current_col = current_col_search_start;
-            int start_row_for_loop = E.search_direction == 1 ? current_row : current_row; // 循环起始行
-            int start_col_for_loop = E.search_direction == 1 ? current_col : current_col; // 循环起始列
 
-            // 循环搜索机制
-            for (int i = 0; i < E.numrows; i++) {
-                current_row = (start_row_for_loop + E.search_direction * i + E.numrows) % E.numrows;
-
-                erow *row = &E.row[current_row];
-                char *match = NULL;
-
-                if (E.search_direction == 1) { // 向下搜索
-                    // 从指定列开始搜索
-                    match = strstr(row->chars + (current_row == start_row_for_loop ? start_col_for_loop : 0), E.query);
-                } else { // 向上搜索 (需要从后往前找)
-                    size_t query_len = strlen(E.query); // 获取查询字符串长度，类型是 size_t
-                    if (query_len == 0) continue; // 避免空查询导致问题
-
-                    // 如果行太短无法包含查询，直接跳过
-                    if ((size_t)row->size < query_len) continue;
-
-                    // 对于向上搜索，需要遍历所有可能的起始点
-                    for (size_t j = row->size - query_len; ; j--) {
-                        // 确保 j + strlen(E.query) 不会越界
-                        if (j + query_len <= (size_t)row->size) {
-                            if (strncmp(&row->chars[j], E.query, query_len) == 0) {
-                                match = &row->chars[j];
-                                break; // 找到最靠右的匹配项
-                            }
-                        }
-                        // 如果 j 减到 0，且 j + query_len 仍然小于 query_len (即 query_len 大于 row->size)
-                        // 这种情况不可能匹配，因为查询字符串比行还长
-                        if (j == 0) break; // 防止 size_t j-- 减到负数变成一个大正数，导致无限循环
-                    }
-                }
-
-                if (match) {
-                    E.last_match_row = current_row;
-                    E.last_match_col = match - row->chars;
-
-                    // 设置当前高亮匹配项并移动光标和视图
-                    E.current_match_row = E.last_match_row;
-                    E.current_match_col = E.last_match_col;
-                    E.cy = E.current_match_row;
-                    E.cx = E.current_match_col;
-                    E.rowoff = E.numrows; // 强制滚动，确保匹配项可见 (临时设置为一个大值)
-                    editorScroll();       // 调用 scroll 来更新 rowoff, coloff
-                    found = 1;
-                    break; // 找到一个匹配项就停止，以便用户按方向键继续
-                }
-            }
-
-            if (!found) {
-                editorSetStatusMessage("Search: \"%s\" (Not found)", E.query);
-                editorFindCleanup(); // 清除任何可能存在的旧高亮
-            } else {
-                 editorSetStatusMessage("Search: %s", E.query);
-            }
-        } else {
-             editorFindCleanup(); // 搜索词为空时清除高亮
-             editorSetStatusMessage("Search: (empty query)");
-        }
-        // 对于每次搜索操作，更新起始行和列，以便下次搜索可以从当前光标位置继续
-        current_row_search_start = E.cy;
-        current_col_search_start = E.cx;
-
-        // 保存当前有效的搜索词到 last_query
-        if (E.query) {
-            if (last_query) free(last_query);
-            last_query = strdup(E.query);
-            last_query_len = strlen(last_query);
-        } else {
-            if (last_query) { free(last_query); last_query = NULL; }
-            last_query_len = 0;
+        if(perform_search) {
+            // 执行搜索查找逻辑
+            editorFindDoSearch();
+        } else if (!E.query || strlen(E.query) == 0) {
+            // 如果没有搜索词，清除高亮并退出搜索
+            editorFindCleanup();
+            editorSetStatusMessage("Search: (empty query)");
+            continue; // 继续等待输入
         }
     }
+
+    if(E.query) {
+        // 退出搜索模式后，清除上次的搜索词
+        if(last_query) {
+            free(last_query); // 释放上次的搜索词
+        }
+        last_query = strdup(E.query); // 保存当前搜索词作为上次搜索词
+    } else {
+        if(last_query) {
+            free(last_query); // 如果没有搜索词，释放上次的搜索词
+            last_query = NULL;
+        }
+    }
+
+    editorFindCleanup(); /// 进一步清除可能的高亮
+
+    //     // 4. 执行搜索逻辑
+    //     if (E.query && strlen(E.query) > 0) {
+    //         int found = 0;
+    //         int current_row = current_row_search_start;
+    //         int current_col = current_col_search_start;
+    //         int start_row_for_loop = E.search_direction == 1 ? current_row : current_row; // 循环起始行
+    //         int start_col_for_loop = E.search_direction == 1 ? current_col : current_col; // 循环起始列
+
+    //         // 循环搜索机制
+    //         for (int i = 0; i < E.numrows; i++) {
+    //             current_row = (start_row_for_loop + E.search_direction * i + E.numrows) % E.numrows;
+
+    //             erow *row = &E.row[current_row];
+    //             char *match = NULL;
+
+    //             if (E.search_direction == 1) { // 向下搜索
+    //                 // 从指定列开始搜索
+    //                 match = strstr(row->chars + (current_row == start_row_for_loop ? start_col_for_loop : 0), E.query);
+    //             } else { // 向上搜索 (需要从后往前找)
+    //                 size_t query_len = strlen(E.query); // 获取查询字符串长度，类型是 size_t
+    //                 if (query_len == 0) continue; // 避免空查询导致问题
+
+    //                 // 如果行太短无法包含查询，直接跳过
+    //                 if ((size_t)row->size < query_len) continue;
+
+    //                 // 对于向上搜索，需要遍历所有可能的起始点
+    //                 for (size_t j = row->size - query_len; ; j--) {
+    //                     // 确保 j + strlen(E.query) 不会越界
+    //                     if (j + query_len <= (size_t)row->size) {
+    //                         if (strncmp(&row->chars[j], E.query, query_len) == 0) {
+    //                             match = &row->chars[j];
+    //                             break; // 找到最靠右的匹配项
+    //                         }
+    //                     }
+    //                     // 如果 j 减到 0，且 j + query_len 仍然小于 query_len (即 query_len 大于 row->size)
+    //                     // 这种情况不可能匹配，因为查询字符串比行还长
+    //                     if (j == 0) break; // 防止 size_t j-- 减到负数变成一个大正数，导致无限循环
+    //                 }
+    //             }
+
+    //             if (match) {
+    //                 E.last_match_row = current_row;
+    //                 E.last_match_col = match - row->chars;
+
+    //                 // 设置当前高亮匹配项并移动光标和视图
+    //                 E.current_match_row = E.last_match_row;
+    //                 E.current_match_col = E.last_match_col;
+    //                 E.cy = E.current_match_row;
+    //                 E.cx = E.current_match_col;
+    //                 E.rowoff = E.numrows; // 强制滚动，确保匹配项可见 (临时设置为一个大值)
+    //                 editorScroll();       // 调用 scroll 来更新 rowoff, coloff
+    //                 found = 1;
+    //                 break; // 找到一个匹配项就停止，以便用户按方向键继续
+    //             }
+    //         }
+
+    //         if (!found) {
+    //             editorSetStatusMessage("Search: \"%s\" (Not found)", E.query);
+    //             editorFindCleanup(); // 清除任何可能存在的旧高亮
+    //         } else {
+    //              editorSetStatusMessage("Search: %s", E.query);
+    //         }
+    //     } else {
+    //          editorFindCleanup(); // 搜索词为空时清除高亮
+    //          editorSetStatusMessage("Search: (empty query)");
+    //     }
+    //     // 对于每次搜索操作，更新起始行和列，以便下次搜索可以从当前光标位置继续
+    //     current_row_search_start = E.cy;
+    //     current_col_search_start = E.cx;
+
+    //     // 保存当前有效的搜索词到 last_query
+    //     if (E.query) {
+    //         if (last_query) free(last_query);
+    //         last_query = strdup(E.query);
+    //         last_query_len = strlen(last_query);
+    //     } else {
+    //         if (last_query) { free(last_query); last_query = NULL; }
+    //         last_query_len = 0;
+    //     }
+    // }
     // 退出搜索模式后，清除上次的搜索词
     // if (E.query) { free(E.query); E.query = NULL; } // 重新进入会复制 last_query
 }

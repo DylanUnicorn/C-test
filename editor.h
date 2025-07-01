@@ -5,9 +5,10 @@
 #include <termios.h> // For struct termios, already in rawmode.h, but good to be explicit
 #include <time.h>    // For time_t
 
-/// 定义Tab的宽度
+/// 定义ctrl键宏 Tab的宽度 ABUF初始化
 #define CTRL_KEY(k) ((k) & 0x1f)
-#define KILO_TAB_STOP 8
+#define TAB_WIDTH 8
+#define ABUF_INIT {NULL, 0}
 
 /// 全局处理宏
 extern void die(const char *s);
@@ -17,7 +18,7 @@ struct abuf {
     int len;
 };
 
-#define ABUF_INIT {NULL, 0}
+
 void abAppend(struct abuf *ab, const char *s, int len);
 void abFree(struct abuf *ab);
 
@@ -50,7 +51,7 @@ typedef struct editorConfig {
     // --- 搜索相关字段 START ---
     char *query;         // 存储当前搜索词
     int last_match_row;  // 上次找到匹配项的行号
-    int last_match_col;  // 上次找到匹配项的列号
+    size_t last_match_col;  // 上次找到匹配项的列号
     int search_direction; // 搜索方向：1 为向下，-1 为向上
     int current_match_row; // 当前高亮匹配项的行
     size_t current_match_col; // 当前高亮匹配项的列
@@ -68,7 +69,7 @@ void editorRefreshScreen(void);
 void editorScroll(void);
 void editorMoveCursor(int key);
 
-// raw
+// rows
 void editorUpdateRow(erow *row);
 void editorInsertRow(int at, char *s, size_t len);
 void editorDeleteRow(int at);
